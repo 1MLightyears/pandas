@@ -2,6 +2,8 @@
 Provide a generic structure to support window functions,
 similar to how we have a Groupby object.
 """
+from __future__ import annotations
+
 from datetime import timedelta
 from functools import partial
 import inspect
@@ -65,6 +67,7 @@ from pandas.core.window.indexers import (
     VariableWindowIndexer,
 )
 from pandas.core.window.numba_ import (
+    generate_manual_numpy_nan_agg_with_axis,
     generate_numba_apply_func,
     generate_numba_table_func,
 )
@@ -313,7 +316,7 @@ class BaseWindow(ShallowMixin, SelectionMixin):
 
         return values
 
-    def _insert_on_column(self, result: "DataFrame", obj: "DataFrame"):
+    def _insert_on_column(self, result: DataFrame, obj: DataFrame):
         # if we have an 'on' column we want to put it back into
         # the results in the same location
         from pandas import Series
@@ -359,7 +362,7 @@ class BaseWindow(ShallowMixin, SelectionMixin):
 
     def _apply_series(
         self, homogeneous_func: Callable[..., ArrayLike], name: Optional[str] = None
-    ) -> "Series":
+    ) -> Series:
         """
         Series version of _apply_blockwise
         """
@@ -791,22 +794,28 @@ class BaseWindowGroupby(GotItemMixin, BaseWindow):
             numba_cache_key,
             **kwargs,
         )
-        # Reconstruct the resulting MultiIndex
+        # Reconstruct the resulting MultiIndex from tuples
         # 1st set of levels = group by labels
-        # 2nd set of levels = original DataFrame/Series index
-        grouped_object_index = self.obj.index
-        grouped_index_name = [*grouped_object_index.names]
-        groupby_keys = [grouping.name for grouping in self._groupby.grouper._groupings]
-        result_index_names = groupby_keys + grouped_index_name
+        # 2nd set of levels = original index
+        # Ignore 2nd set of levels if a group by label include an index level
+        result_index_names = [
+            grouping.name for grouping in self._groupby.grouper._groupings
+        ]
+        grouped_object_index = None
 
-        drop_columns = [
+        column_keys = [
             key
-            for key in groupby_keys
+            for key in result_index_names
             if key not in self.obj.index.names or key is None
         ]
-        if len(drop_columns) != len(groupby_keys):
-            # Our result will have kept groupby columns which should be dropped
-            result = result.drop(columns=drop_columns, errors="ignore")
+
+        if len(column_keys) == len(result_index_names):
+            grouped_object_index = self.obj.index
+            grouped_index_name = [*grouped_object_index.names]
+            result_index_names += grouped_index_name
+        else:
+            # Our result will have still kept the column in the result
+            result = result.drop(columns=column_keys, errors="ignore")
 
         codes = self._groupby.grouper.codes
         levels = self._groupby.grouper.levels
@@ -1378,16 +1387,15 @@ class RollingAndExpandingMixin(BaseWindow):
         nv.validate_window_func("sum", args, kwargs)
         if maybe_use_numba(engine):
             if self.method == "table":
-                raise NotImplementedError("method='table' is not supported.")
-            # Once numba supports np.nansum with axis, args will be relevant.
-            # https://github.com/numba/numba/issues/6610
-            args = () if self.method == "single" else (0,)
+                func = generate_manual_numpy_nan_agg_with_axis(np.nansum)
+            else:
+                func = np.nansum
+
             return self.apply(
-                np.nansum,
+                func,
                 raw=True,
                 engine=engine,
                 engine_kwargs=engine_kwargs,
-                args=args,
             )
         window_func = window_aggregations.roll_sum
         return self._apply(window_func, name="sum", **kwargs)
@@ -1424,16 +1432,15 @@ class RollingAndExpandingMixin(BaseWindow):
         nv.validate_window_func("max", args, kwargs)
         if maybe_use_numba(engine):
             if self.method == "table":
-                raise NotImplementedError("method='table' is not supported.")
-            # Once numba supports np.nanmax with axis, args will be relevant.
-            # https://github.com/numba/numba/issues/6610
-            args = () if self.method == "single" else (0,)
+                func = generate_manual_numpy_nan_agg_with_axis(np.nanmax)
+            else:
+                func = np.nanmax
+
             return self.apply(
-                np.nanmax,
+                func,
                 raw=True,
                 engine=engine,
                 engine_kwargs=engine_kwargs,
-                args=args,
             )
         window_func = window_aggregations.roll_max
         return self._apply(window_func, name="max", **kwargs)
@@ -1496,16 +1503,15 @@ class RollingAndExpandingMixin(BaseWindow):
         nv.validate_window_func("min", args, kwargs)
         if maybe_use_numba(engine):
             if self.method == "table":
-                raise NotImplementedError("method='table' is not supported.")
-            # Once numba supports np.nanmin with axis, args will be relevant.
-            # https://github.com/numba/numba/issues/6610
-            args = () if self.method == "single" else (0,)
+                func = generate_manual_numpy_nan_agg_with_axis(np.nanmin)
+            else:
+                func = np.nanmin
+
             return self.apply(
-                np.nanmin,
+                func,
                 raw=True,
                 engine=engine,
                 engine_kwargs=engine_kwargs,
-                args=args,
             )
         window_func = window_aggregations.roll_min
         return self._apply(window_func, name="min", **kwargs)
@@ -1514,16 +1520,15 @@ class RollingAndExpandingMixin(BaseWindow):
         nv.validate_window_func("mean", args, kwargs)
         if maybe_use_numba(engine):
             if self.method == "table":
-                raise NotImplementedError("method='table' is not supported.")
-            # Once numba supports np.nanmean with axis, args will be relevant.
-            # https://github.com/numba/numba/issues/6610
-            args = () if self.method == "single" else (0,)
+                func = generate_manual_numpy_nan_agg_with_axis(np.nanmean)
+            else:
+                func = np.nanmean
+
             return self.apply(
-                np.nanmean,
+                func,
                 raw=True,
                 engine=engine,
                 engine_kwargs=engine_kwargs,
-                args=args,
             )
         window_func = window_aggregations.roll_mean
         return self._apply(window_func, name="mean", **kwargs)
@@ -1584,16 +1589,15 @@ class RollingAndExpandingMixin(BaseWindow):
     def median(self, engine=None, engine_kwargs=None, **kwargs):
         if maybe_use_numba(engine):
             if self.method == "table":
-                raise NotImplementedError("method='table' is not supported.")
-            # Once numba supports np.nanmedian with axis, args will be relevant.
-            # https://github.com/numba/numba/issues/6610
-            args = () if self.method == "single" else (0,)
+                func = generate_manual_numpy_nan_agg_with_axis(np.nanmedian)
+            else:
+                func = np.nanmedian
+
             return self.apply(
-                np.nanmedian,
+                func,
                 raw=True,
                 engine=engine,
                 engine_kwargs=engine_kwargs,
-                args=args,
             )
         window_func = window_aggregations.roll_median_c
         return self._apply(window_func, name="median", **kwargs)
